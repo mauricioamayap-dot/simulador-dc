@@ -825,6 +825,209 @@ EQUIPOS={
 ]}}
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
+
+def build_excel_export(eq, cur, dc_sets):
+    """
+    Genera un Excel con la programación completa del equipo.
+    Formato: Nombre | Cargo | Ciclo | DC1 | DC2 | DC3 | ... | todos los días
+    """
+    import io as _io
+    wb = openpyxl.Workbook()
+
+    # ── Hoja 1: RESUMEN ────────────────────────────────────────────────────────
+    ws1 = wb.active
+    ws1.title = "RESUMEN"
+
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    NAV  = PatternFill("solid", fgColor="1F3864")
+    RED  = PatternFill("solid", fgColor="C00000")
+    GLD  = PatternFill("solid", fgColor="BF8F00")
+    GRN  = PatternFill("solid", fgColor="375623")
+    GRY  = PatternFill("solid", fgColor="F4F6F9")
+    WHT  = PatternFill("solid", fgColor="FFFFFF")
+    WFNT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
+    BFNT = Font(name="Arial", size=9)
+    HFNT = Font(bold=True, name="Arial", size=9)
+    al_c = Alignment(horizontal="center", vertical="center")
+    al_l = Alignment(horizontal="left",   vertical="center")
+    thin = Side(style="thin", color="CCCCCC")
+    brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
+    start = cfg()["inicio"]; end = cfg()["fin"]
+    all_d = [start + datetime.timedelta(days=i) for i in range((end-start).days+1)]
+
+    # Título
+    ws1.merge_cells(f"A1:H1")
+    tc = ws1.cell(1,1, value=f"PROGRAMACIÓN DC — {eq.upper()}  ·  {start.strftime('%d/%b/%Y')} – {end.strftime('%d/%b/%Y')}")
+    tc.fill=NAV; tc.font=Font(bold=True,color="FFFFFF",name="Arial",size=12)
+    tc.alignment=al_l; ws1.row_dimensions[1].height=26
+
+    # Headers resumen
+    hdrs = ["N°","Nombre","Cargo","Ciclo","Total DCs","Primer DC","Último DC","Días entre DCs (prom)"]
+    ws1.row_dimensions[2].height=20
+    for j,h in enumerate(hdrs,1):
+        c=ws1.cell(2,j,value=h); c.fill=NAV; c.font=WFNT; c.alignment=al_c; c.border=brd
+    ws1.column_dimensions["A"].width=5
+    ws1.column_dimensions["B"].width=32
+    ws1.column_dimensions["C"].width=20
+    ws1.column_dimensions["D"].width=8
+    ws1.column_dimensions["E"].width=10
+    ws1.column_dimensions["F"].width=12
+    ws1.column_dimensions["G"].width=12
+    ws1.column_dimensions["H"].width=18
+
+    CYC_FILLS = {"DC1":RED,"DC2":GLD,"DC3":GRN}
+    ROL_C_HEX = {r:c.replace("#","") for r,c in ROL_C.items()}
+
+    prev_cyc=None
+    row=3
+    for i,p in enumerate(cur):
+        num,nom,rol,cyc,fd=p
+        dcs_sorted=[d for d in sorted(dc_sets[i]) if d>=start and d<=end]
+        n_dc=len(dcs_sorted)
+        fd_first=dcs_sorted[0].strftime("%d/%m/%Y") if dcs_sorted else "—"
+        fd_last =dcs_sorted[-1].strftime("%d/%m/%Y") if dcs_sorted else "—"
+        if len(dcs_sorted)>1:
+            gaps_list=[(dcs_sorted[k+1]-dcs_sorted[k]).days for k in range(len(dcs_sorted)-1)]
+            avg_gap=f"{sum(gaps_list)/len(gaps_list):.1f}d"
+        else:
+            avg_gap="—"
+        # Separador ciclo
+        if cyc!=prev_cyc:
+            ws1.merge_cells(f"A{row}:H{row}")
+            sc=ws1.cell(row,1,value=f"▸ CICLO {cyc}")
+            sc.fill=CYC_FILLS.get(cyc,NAV); sc.font=WFNT; sc.alignment=al_l
+            ws1.row_dimensions[row].height=16; row+=1; prev_cyc=cyc
+        ws1.row_dimensions[row].height=17
+        is_pc="POR CONTRATAR" in nom
+        bg=GRY if row%2==0 else WHT
+        vals=[num,nom,rol,cyc,n_dc,fd_first,fd_last,avg_gap]
+        for j,v in enumerate(vals,1):
+            c=ws1.cell(row,j,value=v); c.border=brd; c.alignment=al_c if j!=2 else al_l
+            if is_pc: c.font=Font(name="Arial",size=9,italic=True,color="888888")
+            else: c.font=BFNT if j>1 else HFNT
+            c.fill=bg
+            if j==3:  # Cargo con color
+                hex_c=ROL_C_HEX.get(rol,"888888")
+                c.fill=PatternFill("solid",fgColor=hex_c)
+                c.font=Font(bold=True,color="FFFFFF",name="Arial",size=9)
+            if j==4:  # Ciclo con color
+                c.fill=CYC_FILLS.get(cyc,NAV)
+                c.font=WFNT
+        row+=1
+
+    # ── Hoja 2: CALENDARIO ─────────────────────────────────────────────────────
+    ws2 = wb.create_sheet("CALENDARIO")
+    DI_ES = ["L","M","M","J","V","S","D"]
+
+    # Freeze panes
+    ws2.freeze_panes = "C4"
+
+    # Headers fecha
+    ws2.row_dimensions[1].height=16
+    ws2.row_dimensions[2].height=14
+    ws2.row_dimensions[3].height=18
+    ws2.cell(1,1,value=f"CALENDARIO DC — {eq}").fill=NAV
+    ws2.cell(1,1).font=Font(bold=True,color="FFFFFF",name="Arial",size=11)
+    ws2.merge_cells(f"A1:B1")
+
+    # Columnas fijas
+    ws2.cell(3,1,value="Nombre").fill=NAV; ws2.cell(3,1).font=WFNT; ws2.cell(3,1).alignment=al_c
+    ws2.cell(3,2,value="Cargo").fill=NAV;  ws2.cell(3,2).font=WFNT; ws2.cell(3,2).alignment=al_c
+    ws2.column_dimensions["A"].width=22
+    ws2.column_dimensions["B"].width=18
+
+    # Encabezados de días
+    for ci,d in enumerate(all_d,3):
+        col_l=chr(ord("A")+ci-1) if ci<=26 else "A"+chr(ord("A")+ci-27)
+        # Mes en fila 1 — solo primer día del mes
+        if d.day==1 or ci==3:
+            mc=ws2.cell(1,ci,value=d.strftime("%b %Y"))
+            mc.fill=NAV; mc.font=WFNT; mc.alignment=al_c
+        # Día número fila 2
+        dc2=ws2.cell(2,ci,value=d.day)
+        dc2.alignment=al_c; dc2.font=Font(name="Arial",size=8)
+        if d.weekday()==6: dc2.fill=PatternFill("solid",fgColor="E0E0E0")
+        elif d.weekday()==5: dc2.fill=PatternFill("solid",fgColor="FFF8E6")
+        # Día semana fila 3
+        dc3=ws2.cell(3,ci,value=DI_ES[d.weekday()])
+        dc3.alignment=al_c; dc3.font=Font(bold=True,name="Arial",size=8)
+        if d.weekday()==6: dc3.fill=PatternFill("solid",fgColor="E0E0E0")
+        elif d.weekday()==5: dc3.fill=PatternFill("solid",fgColor="FFF8E6")
+        else: dc3.fill=NAV; dc3.font=Font(bold=True,color="FFFFFF",name="Arial",size=8)
+        # Ancho columna
+        col_letter = openpyxl.utils.get_column_letter(ci)
+        ws2.column_dimensions[col_letter].width=3.2
+
+    # Datos personas
+    prev_cyc=None
+    cal_row=4
+    for i,p in enumerate(cur):
+        num,nom,rol,cyc,fd=p
+        # Separador ciclo
+        if cyc!=prev_cyc:
+            ws2.merge_cells(start_row=cal_row,start_column=1,end_row=cal_row,end_column=2+len(all_d))
+            sc=ws2.cell(cal_row,1,value=f"▸ {cyc}")
+            sc.fill=CYC_FILLS.get(cyc,NAV); sc.font=WFNT
+            ws2.row_dimensions[cal_row].height=14; cal_row+=1; prev_cyc=cyc
+
+        ws2.row_dimensions[cal_row].height=16
+        is_pc="POR CONTRATAR" in nom
+        # Nombre
+        cn=ws2.cell(cal_row,1,value=f"{num}. {nom[:24]}")
+        cn.font=Font(name="Arial",size=8,italic=is_pc,color="888888" if is_pc else "000000")
+        cn.alignment=al_l; cn.border=brd
+        # Cargo
+        cc=ws2.cell(cal_row,2,value=rol[:16])
+        hex_c=ROL_C_HEX.get(rol,"888888")
+        cc.fill=PatternFill("solid",fgColor=hex_c)
+        cc.font=Font(bold=True,color="FFFFFF",name="Arial",size=7)
+        cc.alignment=al_c; cc.border=brd
+        # Días
+        dcs_i=dc_sets[i]
+        bg_row = "FAFAFA" if cal_row%2==0 else "FFFFFF"
+        for ci,d in enumerate(all_d,3):
+            cell=ws2.cell(cal_row,ci)
+            cell.alignment=al_c; cell.border=brd
+            if d.weekday()==6:
+                cell.fill=PatternFill("solid",fgColor="E0E0E0")
+                cell.value="D"; cell.font=Font(name="Arial",size=7,color="AAAAAA")
+            elif d in dcs_i:
+                cell.fill=CYC_FILLS.get(cyc,NAV)
+                cell.value=cyc; cell.font=Font(bold=True,color="FFFFFF",name="Arial",size=7)
+            elif d.weekday()==5:
+                cell.fill=PatternFill("solid",fgColor="FFF8E6")
+            else:
+                cell.fill=PatternFill("solid",fgColor=bg_row)
+        cal_row+=1
+
+    # ── Hoja 3: OPERANDO POR DÍA ──────────────────────────────────────────────
+    ws3=wb.create_sheet("OPERANDO")
+    ws3.cell(1,1,"PERSONAS OPERANDO POR DÍA").fill=NAV
+    ws3.cell(1,1).font=Font(bold=True,color="FFFFFF",name="Arial",size=11)
+    ws3.merge_cells(f"A1:E1")
+    min_oper_val=cfg()["equipos"].get(eq,{}).get("min_oper",1)
+    WORK=get_work_days()
+    oper_vals=[len(cur)-sum(1 for s in dc_sets if d in s) for d in WORK]
+    ws3.cell(2,1,"Fecha"); ws3.cell(2,2,"Día"); ws3.cell(2,3,"Operando")
+    ws3.cell(2,4,"Mínimo"); ws3.cell(2,5,"Estado")
+    for j in range(1,6):
+        c=ws3.cell(2,j); c.fill=NAV; c.font=WFNT; c.alignment=al_c
+    for i,(d,w) in enumerate(zip(WORK,oper_vals),3):
+        ws3.cell(i,1,value=d).number_format="DD/MM/YYYY"
+        ws3.cell(i,2,value=DI_ES[d.weekday()])
+        ws3.cell(i,3,value=w)
+        ws3.cell(i,4,value=min_oper_val)
+        ok=w>=min_oper_val
+        sc=ws3.cell(i,5,value="✓ OK" if ok else "⚠ ALERTA")
+        sc.fill=PatternFill("solid",fgColor="C6EFCE" if ok else "FFC7CE")
+        sc.font=Font(color="276221" if ok else "9C0006",name="Arial",size=9)
+        bg="FFFFFF" if i%2==0 else "F4F6F9"
+        for j in range(1,5): ws3.cell(i,j).fill=PatternFill("solid",fgColor=bg)
+
+    buf=_io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 st.markdown("""<style>
 html,body,.stApp,.main,.block-container,[data-testid="stAppViewContainer"],
 [data-testid="stVerticalBlock"],section.main>div{background:#FFFFFF!important}
@@ -1038,6 +1241,215 @@ orig_indices = [x[0] for x in cur_indexed]
 cur = [x[1] for x in cur_indexed]
 
 # Remap get_fd to use original indices
+
+def build_excel_all_teams():
+    """
+    Genera un Excel con UNA hoja por equipo + hoja resumen global.
+    """
+    import io as _io
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    wb = openpyxl.Workbook()
+
+    NAV  = PatternFill("solid", fgColor="1F3864")
+    RED  = PatternFill("solid", fgColor="C00000")
+    GLD  = PatternFill("solid", fgColor="BF8F00")
+    GRN  = PatternFill("solid", fgColor="375623")
+    WFNT = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    BFNT = Font(name="Arial", size=8)
+    al_c = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    al_l = Alignment(horizontal="left",   vertical="center")
+    thin = Side(style="thin", color="CCCCCC")
+    brd  = Border(left=thin, right=thin, top=thin, bottom=thin)
+    CYC_FILLS = {"DC1":RED,"DC2":GLD,"DC3":GRN}
+    ROL_C_HEX = {r:c.replace("#","") for r,c in ROL_C.items()}
+    DI_ES = ["L","M","M","J","V","S","D"]
+    start = cfg()["inicio"]; end = cfg()["fin"]
+    all_d = [start + datetime.timedelta(days=i) for i in range((end-start).days+1)]
+    WORK  = get_work_days()
+    EQ_COLORS = {
+        "L1 — SECO":"C00000","L2 — SECO":"BF8F00","L3 — SECO":"375623",
+        "DASA — FRÍO":"2E75B6","Facturación":"C55A11",
+        "Inventarios":"4E6B30","Devolutivos":"7F6000","QDV":"9B59B6",
+    }
+
+    # ── HOJA PORTADA / RESUMEN GLOBAL ─────────────────────────────────────────
+    ws_cov = wb.active
+    ws_cov.title = "RESUMEN GLOBAL"
+    ws_cov.column_dimensions["A"].width = 18
+    ws_cov.column_dimensions["B"].width = 10
+    ws_cov.column_dimensions["C"].width = 10
+    ws_cov.column_dimensions["D"].width = 14
+    ws_cov.column_dimensions["E"].width = 14
+
+    ws_cov.merge_cells("A1:E1")
+    tc=ws_cov.cell(1,1, value=f"PROGRAMACIÓN DC COMPLETA  ·  {start.strftime('%d/%b/%Y')} – {end.strftime('%d/%b/%Y')}")
+    tc.fill=NAV; tc.font=Font(bold=True,color="FFFFFF",name="Arial",size=13)
+    tc.alignment=al_l; ws_cov.row_dimensions[1].height=28
+
+    hdrs=["Equipo","Total","Mín operar","Personas DC hoy","Operando hoy"]
+    for j,h in enumerate(hdrs,1):
+        c=ws_cov.cell(2,j,value=h); c.fill=NAV; c.font=WFNT; c.alignment=al_c
+    ws_cov.row_dimensions[2].height=18
+
+    today = datetime.date.today()
+    gr=3
+    total_personas=0
+    for eq_name in EQUIPOS.keys():
+        people_eq = _people(eq_name)
+        n_eq = len(people_eq)
+        total_personas += n_eq
+        cur_eq = [(p[0],p[1],p[2],p[3],
+                   st.session_state.ov.get((eq_name,i), people_eq[i][4]))
+                  for i,p in enumerate(people_eq)]
+        dc_eq  = [gen_dc(p[4]) for p in cur_eq]
+        min_op = cfg()["equipos"].get(eq_name,{}).get("min_oper",1)
+        on_dc_today = sum(1 for s in dc_eq if today in s)
+        oper_today  = n_eq - on_dc_today
+        ecolor = EQ_COLORS.get(eq_name,"888888")
+        bg = "FFFFFF" if gr%2==0 else "F4F6F9"
+        vals=[eq_name,n_eq,min_op,on_dc_today,oper_today]
+        for j,v in enumerate(vals,1):
+            c=ws_cov.cell(gr,j,value=v)
+            c.alignment=al_c if j>1 else al_l
+            c.font=Font(name="Arial",size=9,bold=(j==1))
+            if j==1:
+                c.fill=PatternFill("solid",fgColor=ecolor)
+                c.font=Font(bold=True,color="FFFFFF",name="Arial",size=9)
+            else:
+                c.fill=PatternFill("solid",fgColor=bg)
+            if j==5:
+                ok=oper_today>=min_op
+                c.fill=PatternFill("solid",fgColor="C6EFCE" if ok else "FFC7CE")
+                c.font=Font(color="276221" if ok else "9C0006",name="Arial",size=9,bold=True)
+            c.border=brd
+        ws_cov.row_dimensions[gr].height=17; gr+=1
+
+    # Total row
+    ws_cov.cell(gr,1,value="TOTAL").fill=NAV
+    ws_cov.cell(gr,1).font=WFNT; ws_cov.cell(gr,1).alignment=al_l
+    ws_cov.cell(gr,2,value=total_personas).fill=NAV
+    ws_cov.cell(gr,2).font=WFNT; ws_cov.cell(gr,2).alignment=al_c
+    ws_cov.row_dimensions[gr].height=18
+
+    # ── UNA HOJA POR EQUIPO ───────────────────────────────────────────────────
+    for eq_name in EQUIPOS.keys():
+        people_eq = _people(eq_name)
+        cur_eq = [(p[0],p[1],p[2],p[3],
+                   st.session_state.ov.get((eq_name,i), people_eq[i][4]))
+                  for i,p in enumerate(people_eq)]
+        # Sort by cycle
+        CYC_ORD={"DC1":0,"DC2":1,"DC3":2}
+        cur_eq_s=sorted(cur_eq, key=lambda x:CYC_ORD.get(x[3],9))
+        dc_eq=[gen_dc(p[4]) for p in cur_eq_s]
+        min_op=cfg()["equipos"].get(eq_name,{}).get("min_oper",1)
+        ecolor=EQ_COLORS.get(eq_name,"1F3864")
+        EQ_FILL=PatternFill("solid",fgColor=ecolor)
+
+        # Sheet name max 31 chars
+        sh_name = eq_name[:28].replace("/","_").replace("—","-").strip()
+        ws = wb.create_sheet(sh_name)
+        ws.freeze_panes = "C4"
+
+        # Title
+        ws.merge_cells(f"A1:B1")
+        ws.cell(1,1,value=f"{eq_name}  ·  {len(cur_eq_s)} personas  ·  {start.strftime('%d/%b/%Y')}–{end.strftime('%d/%b/%Y')}")
+        ws.cell(1,1).fill=EQ_FILL
+        ws.cell(1,1).font=Font(bold=True,color="FFFFFF",name="Arial",size=11)
+        ws.row_dimensions[1].height=24
+
+        # Day headers rows 2+3
+        ws.cell(2,1,"Nombre").fill=EQ_FILL; ws.cell(2,1).font=WFNT; ws.cell(2,1).alignment=al_c
+        ws.cell(2,2,"Cargo").fill=EQ_FILL;  ws.cell(2,2).font=WFNT; ws.cell(2,2).alignment=al_c
+        ws.cell(3,1,"").fill=EQ_FILL; ws.cell(3,2,"").fill=EQ_FILL
+        ws.column_dimensions["A"].width=22
+        ws.column_dimensions["B"].width=15
+
+        # Month labels row 2, day+weekday row 3
+        prev_month=None
+        for ci,d in enumerate(all_d,3):
+            col_l=openpyxl.utils.get_column_letter(ci)
+            ws.column_dimensions[col_l].width=3.0
+            if d.month!=prev_month:
+                ws.cell(2,ci,value=d.strftime("%b")).fill=EQ_FILL
+                ws.cell(2,ci).font=Font(bold=True,color="FFFFFF",name="Arial",size=7)
+                ws.cell(2,ci).alignment=al_c
+                prev_month=d.month
+            else:
+                ws.cell(2,ci,"").fill=EQ_FILL
+            dc3=ws.cell(3,ci,value=str(d.day))
+            if d.weekday()==6:
+                dc3.fill=PatternFill("solid",fgColor="CCCCCC")
+                dc3.font=Font(name="Arial",size=7,color="888888")
+            elif d.weekday()==5:
+                dc3.fill=PatternFill("solid",fgColor="FFE8A0")
+                dc3.font=Font(name="Arial",size=7,bold=True)
+            else:
+                dc3.fill=EQ_FILL
+                dc3.font=Font(bold=True,color="FFFFFF",name="Arial",size=7)
+            dc3.alignment=al_c
+        ws.row_dimensions[2].height=13; ws.row_dimensions[3].height=14
+
+        # Data rows
+        prev_cyc=None; dr=4
+        for i,p in enumerate(cur_eq_s):
+            num,nom,rol,cyc,fd=p
+            if cyc!=prev_cyc:
+                ws.merge_cells(start_row=dr,start_column=1,end_row=dr,end_column=2+len(all_d))
+                sc=ws.cell(dr,1,value=f"  ▸ {cyc}")
+                sc.fill=CYC_FILLS.get(cyc,EQ_FILL); sc.font=WFNT
+                ws.row_dimensions[dr].height=13; dr+=1; prev_cyc=cyc
+
+            ws.row_dimensions[dr].height=15
+            is_pc="POR CONTRATAR" in nom
+            bg_r="FAFAFA" if dr%2==0 else "FFFFFF"
+            # Nombre
+            cn=ws.cell(dr,1,value=f"{num}. {nom[:22]}")
+            cn.font=Font(name="Arial",size=8,italic=is_pc,color="999999" if is_pc else "000000")
+            cn.alignment=al_l; cn.border=brd
+            # Cargo
+            cc=ws.cell(dr,2,value=rol[:14])
+            hc=ROL_C_HEX.get(rol,"888888")
+            cc.fill=PatternFill("solid",fgColor=hc)
+            cc.font=Font(bold=True,color="FFFFFF",name="Arial",size=7)
+            cc.alignment=al_c; cc.border=brd
+            # Días
+            dcs_i=dc_eq[i]
+            for ci,d in enumerate(all_d,3):
+                cell=ws.cell(dr,ci)
+                cell.alignment=al_c; cell.border=brd
+                if d.weekday()==6:
+                    cell.fill=PatternFill("solid",fgColor="DDDDDD")
+                elif d in dcs_i:
+                    cell.fill=CYC_FILLS.get(cyc,EQ_FILL)
+                    cell.value=cyc[:3]; cell.font=Font(bold=True,color="FFFFFF",name="Arial",size=6)
+                elif d.weekday()==5:
+                    cell.fill=PatternFill("solid",fgColor="FFF5CC")
+                else:
+                    cell.fill=PatternFill("solid",fgColor=bg_r)
+            dr+=1
+
+        # Operando row at bottom
+        dr+=1
+        ws.cell(dr,1,"OPERANDO").fill=EQ_FILL; ws.cell(dr,1).font=WFNT; ws.cell(dr,1).alignment=al_c; ws.cell(dr,1).border=brd
+        ws.cell(dr,2,f"Mín:{min_op}").fill=EQ_FILL; ws.cell(dr,2).font=WFNT; ws.cell(dr,2).alignment=al_c; ws.cell(dr,2).border=brd
+        n_eq=len(cur_eq_s)
+        for ci,d in enumerate(all_d,3):
+            on_dc=sum(1 for s in dc_eq if d in s)
+            oper=n_eq-on_dc
+            cell=ws.cell(dr,ci)
+            ok=oper>=min_op
+            cell.value=oper; cell.alignment=al_c; cell.border=brd
+            cell.fill=PatternFill("solid",fgColor="C6EFCE" if ok else "FFC7CE")
+            cell.font=Font(name="Arial",size=7,bold=not ok,
+                           color="276221" if ok else "9C0006")
+        ws.row_dimensions[dr].height=15
+        ws.freeze_panes="C4"
+
+    buf=_io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def get_fd_sorted(eq, sorted_idx):
     orig_i = orig_indices[sorted_idx]
     return st.session_state.ov.get((eq, orig_i), people[orig_i][4])
@@ -1316,4 +1728,40 @@ with all_tabs[-1]:
         for r in default_info:
             st.markdown(f'<div class="prem-ok">📌 {r}</div>',unsafe_allow_html=True)
 
-st.caption("Simulador DC · Jun–Jul 2026 · Ciclo 40-40-48h · Auto-scheduler · Solver 3 personas · Premisas editables")
+# ── Botones de descarga ──────────────────────────────────────────────────────
+st.markdown("---")
+col_dl1, col_dl2, col_dl3 = st.columns(3)
+
+with col_dl1:
+    if st.button("📥 Descargar este equipo", use_container_width=True):
+        with st.spinner("Generando Excel..."):
+            xl_bytes = build_excel_export(eq, cur, dc_sets)
+        fname = f"DC_{eq.replace(' ','_').replace('—','').replace('/','_')}_{cfg()['inicio'].strftime('%b%Y')}.xlsx"
+        st.download_button(
+            label=f"⬇️ {eq}",
+            data=xl_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_single"
+        )
+
+with col_dl2:
+    if st.button("📦 Descargar TODOS los equipos", use_container_width=True, type="primary"):
+        with st.spinner("Generando Excel completo — todos los equipos..."):
+            xl_bytes = build_excel_all_teams()
+        fname = f"Programacion_DC_COMPLETA_{cfg()['inicio'].strftime('%b%Y')}_al_{cfg()['fin'].strftime('%b%Y')}.xlsx"
+        st.download_button(
+            label="⬇️ Programación completa",
+            data=xl_bytes,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_all"
+        )
+
+with col_dl3:
+    st.caption(f"Período: {cfg()['inicio'].strftime('%d/%b/%Y')} – {cfg()['fin'].strftime('%d/%b/%Y')}")
+    st.caption(f"Equipos: {len(EQUIPOS)} · Total: {sum(len(_people(e)) for e in EQUIPOS)} personas")
+
+st.caption("Simulador DC · Ciclo 40-40-48h · Auto-scheduler · Solver 3 personas · Premisas editables")
