@@ -204,65 +204,104 @@ EQUIPOS={'L1 — SECO':{'min_oper':27,'n':32,'people':[
     (11,'POR CONTRATAR','aux Devolutivos','DC3',J(15)),
 ]}}
 
-# ── Solver: prueba TODOS los deltas para TODAS las personas ──────────────────
+# ── Solver ────────────────────────────────────────────────────────────────────
 def count_violations(dc_sets, N, min_oper):
-    """Cuenta días con operando < mínimo"""
-    count = 0
-    for d in WORK:
-        on_dc = sum(1 for s in dc_sets if d in s)
-        if N - on_dc < min_oper:
-            count += 1
-    return count
+    return sum(1 for d in WORK if N - sum(1 for s in dc_sets if d in s) < min_oper)
+
+def best_move_for(idx, p, dc_sets, N, min_oper):
+    """Mejor fecha para mover a la persona idx"""
+    base = count_violations(dc_sets, N, min_oper)
+    best = None
+    for delta in list(range(-10, 0)) + list(range(1, 11)):
+        new_fd = p[4] + datetime.timedelta(days=delta)
+        if new_fd < datetime.date(2026,6,1) or new_fd > datetime.date(2026,7,5): continue
+        if new_fd.weekday() == 6: continue
+        ns = dc_sets.copy(); ns[idx] = gen_dc(new_fd)
+        nv = count_violations(ns, N, min_oper)
+        if best is None or nv < best[0] or (nv == best[0] and abs(delta) < best[2]):
+            best = (nv, new_fd, abs(delta))
+    return best
 
 def auto_solve_full(eq, cur, dc_sets):
     """
-    Itera todas las personas × todos los deltas -7..+7
-    Devuelve lista de soluciones que reducen violaciones
+    1) Prueba mover 1 persona → todas las combinaciones persona × delta
+    2) Si nadie resuelve solo, prueba 2 personas en combinación
+    Devuelve lista de sugerencias ordenadas por mejora
     """
     N = len(cur)
     min_oper = EQUIPOS[eq]['min_oper']
     base_viol = count_violations(dc_sets, N, min_oper)
-    if base_viol == 0:
-        return []
+    if base_viol == 0: return []
 
-    solutions = []
+    # ── Paso 1: 1 persona ─────────────────────────────────────────────────────
+    singles = []
     for idx, p in enumerate(cur):
-        if 'POR CONTRATAR' in p[1]:
-            continue
-        fd_orig = p[4]
-        for delta in range(-7, 8):
-            if delta == 0:
-                continue
-            new_fd = fd_orig + datetime.timedelta(days=delta)
-            if new_fd < datetime.date(2026, 6, 1):
-                continue
-            if new_fd > datetime.date(2026, 7, 5):
-                continue
-            if new_fd.weekday() == 6:  # no iniciar en domingo
-                continue
-            # Simular
-            new_sets = dc_sets.copy()
-            new_sets[idx] = gen_dc(new_fd)
-            new_viol = count_violations(new_sets, N, min_oper)
-            if new_viol < base_viol:
-                solutions.append({
-                    'idx': idx,
-                    'nombre': p[1].split()[0] + ' ' + p[1].split()[1] if len(p[1].split())>1 else p[1],
-                    'fd_orig': fd_orig,
-                    'fd_new': new_fd,
-                    'mejora': base_viol - new_viol,
-                    'new_viol': new_viol,
-                })
-    # Ordenar por mayor mejora
-    solutions.sort(key=lambda x: (-x['mejora'], abs((x['fd_new']-x['fd_orig']).days)))
-    # Quitar duplicados por persona (mejor solución por persona)
+        if 'POR CONTRATAR' in p[1]: continue
+        result = best_move_for(idx, p, dc_sets, N, min_oper)
+        if result and result[0] < base_viol:
+            nom = ' '.join(p[1].split()[:2])
+            singles.append({
+                'tipo': '1 persona', 'idx': idx, 'idx2': None,
+                'nombre': nom, 'nombre2': None,
+                'fd_orig': p[4], 'fd_new': result[1],
+                'fd_orig2': None, 'fd_new2': None,
+                'mejora': base_viol - result[0], 'new_viol': result[0],
+            })
+
+    singles.sort(key=lambda x: (-x['mejora'], abs((x['fd_new']-x['fd_orig']).days)))
     seen = set()
-    unique = []
-    for s in solutions:
+    top_singles = []
+    for s in singles:
         if s['idx'] not in seen:
-            seen.add(s['idx'])
-            unique.append(s)
-    return unique[:5]
+            seen.add(s['idx']); top_singles.append(s)
+    top_singles = top_singles[:5]
+
+    # Si alguno resuelve completamente, retornar solo esos
+    perfect = [s for s in top_singles if s['new_viol'] == 0]
+    if perfect: return perfect
+
+    # ── Paso 2: 2 personas (solo si el deficit es ≤3 y hay pocas alertas) ────
+    if base_viol <= 5:
+        # Tomar las 8 mejores personas del paso 1
+        candidates = [s['idx'] for s in top_singles[:8]] if top_singles else \
+                     [i for i,p in enumerate(cur) if 'POR CONTRATAR' not in p[1]][:8]
+
+        pairs = []
+        for ia in range(len(candidates)):
+            for ib in range(ia+1, len(candidates)):
+                idxA = candidates[ia]; idxB = candidates[ib]
+                pA = cur[idxA]; pB = cur[idxB]
+                rA = best_move_for(idxA, pA, dc_sets, N, min_oper)
+                if not rA: continue
+                # Aplicar movimiento A y buscar mejor B
+                ns_a = dc_sets.copy(); ns_a[idxA] = gen_dc(rA[1])
+                rB = best_move_for(idxB, pB, ns_a, N, min_oper)
+                if not rB: continue
+                nv = count_violations(
+                    {**{i:s for i,s in enumerate(dc_sets)},
+                     idxA:gen_dc(rA[1]), idxB:gen_dc(rB[1])}.values().__iter__(),
+                    N, min_oper)
+                # recompute properly
+                tmp = list(dc_sets)
+                tmp[idxA] = gen_dc(rA[1]); tmp[idxB] = gen_dc(rB[1])
+                nv2 = count_violations(tmp, N, min_oper)
+                if nv2 < base_viol:
+                    nomA = ' '.join(pA[1].split()[:2])
+                    nomB = ' '.join(pB[1].split()[:2])
+                    pairs.append({
+                        'tipo': '2 personas', 'idx': idxA, 'idx2': idxB,
+                        'nombre': nomA, 'nombre2': nomB,
+                        'fd_orig': pA[4], 'fd_new': rA[1],
+                        'fd_orig2': pB[4], 'fd_new2': rB[1],
+                        'mejora': base_viol-nv2, 'new_viol': nv2,
+                    })
+        pairs.sort(key=lambda x: (-x['mejora'], 0))
+        # Combinar resultados
+        result = top_singles + [p for p in pairs if p['new_viol'] < base_viol]
+        result.sort(key=lambda x: (-x['mejora'], x['tipo']))
+        return result[:6]
+
+    return top_singles
 
 # ── State ─────────────────────────────────────────────────────────────────────
 if 'ov' not in st.session_state:
@@ -274,19 +313,50 @@ def get_fd(eq, i):
 # ── CSS: fondo BLANCO forzado ─────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Fondo blanco en toda la app */
-.stApp { background-color: #FFFFFF !important; }
+/* ── Fondo blanco en toda la app ── */
+.stApp, .main, .block-container { background-color: #FFFFFF !important; }
 [data-testid="stSidebar"] { background-color: #F8F9FA !important; }
-.block-container { padding-top: .8rem; background: white; }
-/* Texto oscuro por defecto */
-body, p, div, span, h1, h2, h3, label { color: #1a1a1a !important; }
-/* Quitar fondo oscuro de contenedores */
+.block-container { padding-top: .8rem; }
+
+/* ── Texto siempre oscuro ── */
+body, p, li, label, span, div, h1, h2, h3, h4, h5,
+.stMarkdown, .stText { color: #1a1a1a !important; }
+
+/* ── Tabs: fondo blanco, texto negro ── */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #f0f4f8 !important;
+    border-radius: 8px;
+    padding: 4px;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent !important;
+    color: #1a1a1a !important;
+    font-weight: 600;
+}
+.stTabs [aria-selected="true"] {
+    background-color: #FFFFFF !important;
+    color: #1F3864 !important;
+    border-radius: 6px;
+}
+.stTabs [data-baseweb="tab-panel"] {
+    background-color: #FFFFFF !important;
+    color: #1a1a1a !important;
+}
+/* ── Selectbox y inputs ── */
+[data-testid="stSelectbox"] label,
+[data-testid="stDateInput"] label { color: #1a1a1a !important; }
+
+/* ── Métricas ── */
 [data-testid="metric-container"] {
     background: #f0f4f8 !important;
     border: 1px solid #dee2e6;
     border-radius: 8px;
     padding: 8px;
+    color: #1a1a1a !important;
 }
+[data-testid="metric-container"] * { color: #1a1a1a !important; }
+
+/* ── Clases custom ── */
 .dc-p { padding:2px 8px; border-radius:3px; font-size:11px;
         font-weight:bold; display:inline-block; margin:1px; }
 .prem-ok  { border-left:4px solid #375623; background:#f0fff4;
@@ -296,6 +366,9 @@ body, p, div, span, h1, h2, h3, label { color: #1a1a1a !important; }
             padding:7px 12px; border-radius:4px; margin:3px 0;
             font-size:13px; color:#1a1a1a !important; }
 .sug-box  { border:1px solid #375623; background:#f0fff4;
+            padding:10px 14px; border-radius:6px; margin:4px 0;
+            color:#1a1a1a !important; }
+.sug-box2 { border:1px solid #2E75B6; background:#EFF6FF;
             padding:10px 14px; border-radius:6px; margin:4px 0;
             color:#1a1a1a !important; }
 </style>
@@ -442,19 +515,39 @@ if viol_days:
         for s in st.session_state[sol_key]:
             delta_d = (s['fd_new'] - s['fd_orig']).days
             signo = "+" if delta_d > 0 else ""
-            mejora_txt = f"resuelve {s['mejora']} día(s)" if s['new_viol']==0 else f"reduce a {s['new_viol']} alerta(s)"
-            st.markdown(
-                f'<div class="sug-box">'
-                f'👤 <b>{s["nombre"]}</b> &nbsp;|&nbsp; '
-                f'{s["fd_orig"].strftime("%d/%b")} → <b>{s["fd_new"].strftime("%d/%b")}</b> '
-                f'({signo}{delta_d}d) &nbsp;|&nbsp; '
-                f'✅ <i>{mejora_txt}</i>'
-                f'</div>', unsafe_allow_html=True)
-            if st.button(f"✅ Aplicar — mover {s['nombre']} al {s['fd_new'].strftime('%d/%b')}",
-                         key=f"apl_{s['idx']}_{s['fd_new']}"):
-                st.session_state.ov[(eq, s['idx'])] = s['fd_new']
-                st.session_state.pop(sol_key, None)
-                st.rerun()
+            res_txt = "✅ resuelve todo" if s['new_viol']==0 else f"reduce a {s['new_viol']} alerta(s)"
+            tipo_badge = f"<b style='color:#375623'>[{s['tipo']}]</b>"
+
+            if s['tipo'] == '2 personas' and s['idx2'] is not None:
+                delta_d2 = (s['fd_new2'] - s['fd_orig2']).days
+                signo2 = "+" if delta_d2 > 0 else ""
+                box_class = "sug-box2"
+                txt = (f'{tipo_badge} &nbsp;'
+                       f'👤 <b>{s["nombre"]}</b>: {s["fd_orig"].strftime("%d/%b")} → <b>{s["fd_new"].strftime("%d/%b")}</b> ({signo}{delta_d}d)'
+                       f' &nbsp;+&nbsp; '
+                       f'👤 <b>{s["nombre2"]}</b>: {s["fd_orig2"].strftime("%d/%b")} → <b>{s["fd_new2"].strftime("%d/%b")}</b> ({signo2}{delta_d2}d)'
+                       f' &nbsp;|&nbsp; {res_txt}')
+            else:
+                box_class = "sug-box"
+                txt = (f'{tipo_badge} &nbsp;'
+                       f'👤 <b>{s["nombre"]}</b>: {s["fd_orig"].strftime("%d/%b")} → <b>{s["fd_new"].strftime("%d/%b")}</b> ({signo}{delta_d}d)'
+                       f' &nbsp;|&nbsp; {res_txt}')
+
+            st.markdown(f'<div class="{box_class}">{txt}</div>', unsafe_allow_html=True)
+
+            if s['tipo'] == '2 personas' and s['idx2'] is not None:
+                if st.button(f"✅ Aplicar ambos cambios — {s['nombre']} + {s['nombre2']}",
+                             key=f"apl2_{s['idx']}_{s['idx2']}_{s['fd_new']}"):
+                    st.session_state.ov[(eq, s['idx'])]  = s['fd_new']
+                    st.session_state.ov[(eq, s['idx2'])] = s['fd_new2']
+                    st.session_state.pop(sol_key, None)
+                    st.rerun()
+            else:
+                if st.button(f"✅ Aplicar — mover {s['nombre']} al {s['fd_new'].strftime('%d/%b')}",
+                             key=f"apl1_{s['idx']}_{s['fd_new']}"):
+                    st.session_state.ov[(eq, s['idx'])] = s['fd_new']
+                    st.session_state.pop(sol_key, None)
+                    st.rerun()
 else:
     st.success("✅ **Todas las premisas cumplidas** — operando mínimo garantizado en todo el período Jun–Jul 2026")
 
