@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 import io
-import json
+import yaml
 import bcrypt
 try:
     import openpyxl
@@ -21,18 +21,18 @@ st.set_page_config(page_title="Simulador DC", page_icon="📅",
 # ════════════════════════════════════════════════════════════════════════════
 # SISTEMA DE AUTENTICACIÓN
 # ════════════════════════════════════════════════════════════════════════════
-USERS_FILE = "users.json"
+USERS_FILE = "users.yaml"
 
 def load_users():
     try:
         with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            return yaml.safe_load(f)
     except:
-        return {'credentials':{'usernames':{}}}
+        return {'credentials':{'usernames':{}},'cookie':{'expiry_days':1,'key':'dc2026','name':'dc_auth'}}
 
 def save_users(data):
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
 
 def check_password(plain, hashed):
     try:
