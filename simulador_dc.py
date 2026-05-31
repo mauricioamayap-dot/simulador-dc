@@ -4,6 +4,12 @@ SIMULADOR DC v4 — Fondo claro, auto-solver corregido, recalculo automatico
 import streamlit as st
 import pandas as pd
 import datetime
+import io
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except:
+    HAS_OPENPYXL = False
 
 st.set_page_config(page_title="Simulador DC",page_icon="📅",
                    layout="wide",initial_sidebar_state="expanded")
@@ -36,6 +42,89 @@ def gen_dc(fd):
     return set(res)
 
 def gen_dc_list(fd): return sorted(gen_dc(fd))
+
+
+def parse_upload(file_bytes, eq):
+    """
+    Parse uploaded Excel/CSV and return list of people tuples.
+    Expected columns: N°, Nombre, Rol, Ciclo, 1er_DC
+    """
+    import io
+    results = []
+    errors  = []
+    try:
+        if HAS_OPENPYXL:
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+        else:
+            import csv
+            rows = list(csv.reader(io.StringIO(file_bytes.decode('utf-8'))))
+    except Exception as e:
+        return None, [f"Error leyendo archivo: {e}"]
+
+    # Find header row (look for 'Nombre' in first 3 rows)
+    header_row = None
+    for i, row in enumerate(rows[:3]):
+        if row and any(str(c).lower().strip() in ['nombre','name'] for c in row if c):
+            header_row = i; break
+    if header_row is None:
+        return None, ["No se encontró encabezado. Columnas requeridas: N°, Nombre, Rol, Ciclo, 1er_DC"]
+
+    headers = [str(c).strip().lower() if c else '' for c in rows[header_row]]
+    col_map = {}
+    for i, h in enumerate(headers):
+        if 'nombre' in h or 'name' in h:   col_map['nombre'] = i
+        if 'rol' in h:                      col_map['rol']    = i
+        if 'ciclo' in h:                    col_map['ciclo']  = i
+        if '1er' in h or 'dc' in h or 'fecha' in h or 'date' in h: col_map['fecha'] = i
+        if h == 'n°' or h == 'n' or h == '#': col_map['num'] = i
+
+    missing = [k for k in ['nombre','rol','ciclo','fecha'] if k not in col_map]
+    if missing:
+        return None, [f"Faltan columnas: {', '.join(missing)}. Encontradas: {', '.join(h for h in headers if h)}"]
+
+    for r_idx, row in enumerate(rows[header_row+1:], 1):
+        if not row or not any(c for c in row if c):
+            continue
+        try:
+            num    = row[col_map['num']] if 'num' in col_map else r_idx
+            nombre = str(row[col_map['nombre']]).strip() if row[col_map['nombre']] else ''
+            rol    = str(row[col_map['rol']]).strip()    if row[col_map['rol']]    else ''
+            ciclo  = str(row[col_map['ciclo']]).strip()  if row[col_map['ciclo']]  else ''
+            fecha_raw = row[col_map['fecha']]
+
+            if not nombre: continue
+
+            # Parse date
+            if isinstance(fecha_raw, datetime.datetime):
+                fd = fecha_raw.date()
+            elif isinstance(fecha_raw, datetime.date):
+                fd = fecha_raw
+            elif fecha_raw:
+                s = str(fecha_raw).strip()
+                for fmt in ['%d/%m/%Y','%Y-%m-%d','%d-%m-%Y','%d/%m/%y','%m/%d/%Y']:
+                    try: fd = datetime.datetime.strptime(s, fmt).date(); break
+                    except: pass
+                else:
+                    errors.append(f"Fila {r_idx}: fecha '{fecha_raw}' no reconocida"); continue
+            else:
+                errors.append(f"Fila {r_idx}: {nombre} no tiene fecha"); continue
+
+            # Validate date range
+            if fd < datetime.date(2026,6,1) or fd > datetime.date(2026,7,12):
+                errors.append(f"Fila {r_idx}: {nombre} — fecha {fd} fuera del rango Jun1-Jul12/2026")
+                continue
+
+            if ciclo not in ('DC1','DC2','DC3'):
+                ciclo = 'DC1'  # default
+
+            results.append((int(num) if str(num).isdigit() else r_idx,
+                            nombre, rol, ciclo, fd))
+        except Exception as e:
+            errors.append(f"Fila {r_idx}: error — {e}")
+
+    return results if results else None, errors
 
 J=lambda d:datetime.date(2026,6,d)
 
@@ -381,6 +470,45 @@ with st.sidebar:
     st.divider()
 
     eq = st.selectbox("**Equipo:**", list(EQUIPOS.keys()))
+
+    # ── Carga de personal ────────────────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("📂 Cargar personal desde Excel/CSV", expanded=False):
+        st.caption("Sube un archivo con columnas: N°, Nombre, Rol, Ciclo, 1er_DC")
+        uploaded = st.file_uploader(
+            "Selecciona archivo:", type=["xlsx","csv"],
+            key=f"upload_{eq}",
+            label_visibility="collapsed"
+        )
+        if uploaded:
+            file_bytes = uploaded.read()
+            parsed, errs = parse_upload(file_bytes, eq)
+            if parsed:
+                if st.button(f"✅ Cargar {len(parsed)} personas en {eq}",
+                             use_container_width=True, type="primary"):
+                    st.session_state[f'custom_{eq}'] = parsed
+                    st.session_state.ov = {k:v for k,v in st.session_state.ov.items()
+                                           if k[0]!=eq}
+                    st.success(f"✓ {len(parsed)} personas cargadas")
+                    st.rerun()
+                st.caption(f"Vista previa: {len(parsed)} personas encontradas")
+                prev_df = pd.DataFrame(
+                    [(p[0],p[1][:28],p[2],p[3],p[4].strftime('%d/%m/%Y'))
+                     for p in parsed[:8]],
+                    columns=['N°','Nombre','Rol','Ciclo','1er DC'])
+                st.dataframe(prev_df, hide_index=True, use_container_width=True)
+            if errs:
+                for e in errs[:5]:
+                    st.warning(e)
+        if f'custom_{eq}' in st.session_state:
+            n_custom = len(st.session_state[f'custom_{eq}'])
+            st.success(f"✓ Datos propios cargados: {n_custom} personas")
+            if st.button("🗑 Volver a datos originales", use_container_width=True):
+                del st.session_state[f'custom_{eq}']
+                st.session_state.ov = {k:v for k,v in st.session_state.ov.items()
+                                       if k[0]!=eq}
+                st.rerun()
+
     info = EQUIPOS[eq]
     people = info['people']
     min_oper = info['min_oper']
@@ -447,8 +575,15 @@ with st.sidebar:
                 st.rerun()
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
-info = EQUIPOS[eq]; people = info['people']
-N = info['n']; min_oper = info['min_oper']
+info = EQUIPOS[eq]
+# Use custom uploaded data if available
+if f'custom_{eq}' in st.session_state:
+    people = st.session_state[f'custom_{eq}']
+    N = len(people)
+    min_oper = info['min_oper']
+else:
+    people = info['people']
+    N = info['n']; min_oper = info['min_oper']
 cur = [(p[0],p[1],p[2],p[3],get_fd(eq,i)) for i,p in enumerate(people)]
 dc_sets = [gen_dc(p[4]) for p in cur]
 
