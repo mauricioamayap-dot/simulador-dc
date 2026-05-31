@@ -1103,7 +1103,8 @@ def render_cal(month):
 
     # Header de fechas
     html='<div style="overflow-x:auto"><table class="cal-table"><thead><tr>'
-    html+='<th style="min-width:110px">Persona</th>'
+    html+='<th style="min-width:110px;position:sticky;left:0;z-index:2;background:#1F3864">Persona</th>'
+    html+='<th style="min-width:90px;position:sticky;left:110px;z-index:2;background:#1F3864">Cargo</th>'
     for d in md:
         if d.weekday()==6:
             html+=f'<th class="cal-sun">{d.day}<br>D</th>'
@@ -1121,15 +1122,20 @@ def render_cal(month):
         # Separador de ciclo
         if cyc!=prev_cyc:
             bg=DC_BG.get(cyc,'#888'); fg=DC_FG.get(cyc,'white')
-            colspan=len(md)+1
+            colspan=len(md)+2
             html+=(f'<tr><td colspan="{colspan}" style="background:{bg};color:{fg};'
                    f'font-weight:bold;padding:4px 8px;font-size:11px">▸ {cyc}</td></tr>')
             prev_cyc=cyc
         html+='<tr>'
-        # Nombre
+        # Nombre + Cargo
         is_pc='POR CONTRATAR' in nom
         nom_style='color:#999;font-style:italic' if is_pc else 'color:#1F3864;font-weight:600'
-        html+=f'<td class="cal-nom" style="{nom_style}" title="{nom}">{num}. {nom[:18]}</td>'
+        rc=ROL_C.get(rol,'#888')
+        html+=f'<td class="cal-nom" style="position:sticky;left:0;z-index:1;background:#F0F4F8;{nom_style}" title="{nom}">{num}. {nom[:16]}</td>'
+        html+=(f'<td style="position:sticky;left:110px;z-index:1;background:#F0F4F8;'
+               f'padding:2px 5px;white-space:nowrap">'
+               f'<span style="background:{rc};color:white;padding:1px 5px;border-radius:3px;'
+               f'font-size:9px;font-weight:bold">{rol[:14]}</span></td>')
         # Días
         for j in mi:
             d=all_d[j]
