@@ -50,8 +50,44 @@ def default_config():
         }
     }
 
-if 'ov'  not in st.session_state: st.session_state.ov  = {}
-if 'cfg' not in st.session_state: st.session_state.cfg = default_config()
+if 'ov'    not in st.session_state: st.session_state.ov    = {}
+if 'cfg'   not in st.session_state: st.session_state.cfg   = default_config()
+if 'rules' not in st.session_state: st.session_state.rules = {}
+
+RULE_TYPES = {
+    'rol_rol':      '🔴 Dos roles no comparten DC el mismo día',
+    'cobertura':    '👷 Mínimo N de un rol activos por día',
+    'persona_dia':  '📅 Persona solo descansa en días específicos',
+    'exclusion':    '🚫 Persona NO descansa en fecha concreta',
+    'inter_equipo': '🔗 Regla entre dos equipos',
+    'min_rol':      '🔢 Mínimo N personas de un rol activas',
+}
+
+def default_rules_for(eq):
+    base=[]
+    if 'SECO' in eq:
+        base.append({'id':f'r_lmc_{eq[:2]}','tipo':'rol_rol','activa':True,'equipo':eq,
+                     'rol1':'Lider de turno','rol2':'Montacarguista',
+                     'desc':'Líder y Montacarguista no comparten DC'})
+        base.append({'id':f'r_mc9_{eq[:2]}','tipo':'min_rol','activa':True,'equipo':eq,
+                     'rol':'Montacarguista','min_n':9,
+                     'desc':'Mínimo 9 Montacarguistas activos'})
+    if 'DASA' in eq:
+        base.append({'id':'r_lmc_dasa','tipo':'rol_rol','activa':True,'equipo':eq,
+                     'rol1':'Líder Turno','rol2':'Montacarguista',
+                     'desc':'Líder DASA y MC no comparten DC'})
+        base.append({'id':'r_aux_dasa','tipo':'min_rol','activa':True,'equipo':eq,
+                     'rol':'Auxiliar Logística','min_n':7,
+                     'desc':'Mínimo 7 auxiliares activos'})
+        base.append({'id':'r_mc_dasa','tipo':'min_rol','activa':True,'equipo':eq,
+                     'rol':'Montacarguista','min_n':1,
+                     'desc':'Mínimo 1 Montacarguista activo en DASA'})
+    return base
+
+def get_rules(eq):
+    if eq not in st.session_state.rules:
+        st.session_state.rules[eq]=default_rules_for(eq)
+    return st.session_state.rules[eq]
 
 def cfg(): return st.session_state.cfg
 def get_fd(eq,i): return st.session_state.ov.get((eq,i), _people(eq)[i][4])
@@ -82,6 +118,200 @@ def get_work_days():
 def count_viol(dc_sets_list, N, min_oper):
     wk=get_work_days()
     return sum(1 for d in wk if N-sum(1 for s in dc_sets_list if d in s)<min_oper)
+
+# ── Motor de reglas ─────────────────────────────────────────────────────────
+def validate_rules(eq, cur, dc_sets):
+    rules=get_rules(eq); violations=[]; wk=get_work_days()
+    for rule in rules:
+        if not rule.get('activa',True): continue
+        rid=rule['id']; tipo=rule['tipo']
+
+        if tipo=='rol_rol':
+            r1,r2=rule.get('rol1',''),rule.get('rol2','')
+            i1=[i for i,p in enumerate(cur) if p[2]==r1]
+            i2=[i for i,p in enumerate(cur) if p[2]==r2]
+            for d in wk:
+                on1=[i for i in i1 if d in dc_sets[i]]
+                on2=[i for i in i2 if d in dc_sets[i]]
+                if on1 and on2:
+                    violations.append({'regla':rule,'dia':d,'personas':on1+on2,'tipo':'rol_rol',
+                        'msg':f"🔴 {d.strftime('%d/%b')}: **{r1}** y **{r2}** coinciden en DC"})
+
+        elif tipo=='cobertura':
+            rol=rule.get('rol',''); mn=rule.get('min_n',1)
+            ri=[i for i,p in enumerate(cur) if p[2]==rol]; nr=len(ri)
+            for d in wk:
+                w=nr-sum(1 for i in ri if d in dc_sets[i])
+                if w<mn:
+                    violations.append({'regla':rule,'dia':d,'personas':[i for i in ri if d in dc_sets[i]],
+                        'tipo':'cobertura','msg':f"👷 {d.strftime('%d/%b')}: {w} **{rol}** activos (mín {mn})"})
+
+        elif tipo=='persona_dia':
+            nom=rule.get('nombre',''); dias_s=rule.get('dias_permitidos',[])
+            dias_ok=[]
+            for ds in dias_s:
+                try: dias_ok.append(datetime.datetime.strptime(ds,'%Y-%m-%d').date())
+                except: pass
+            for i,p in enumerate(cur):
+                if p[1]==nom and dias_ok:
+                    bad=[d for d in dc_sets[i] if d in wk and d not in dias_ok]
+                    for d in bad:
+                        violations.append({'regla':rule,'dia':d,'personas':[i],'tipo':'persona_dia',
+                            'msg':f"📅 {d.strftime('%d/%b')}: **{nom.split()[0]}** descansa fuera de días permitidos"})
+
+        elif tipo=='min_rol':
+            rol=rule.get('rol',''); mn=rule.get('min_n',1)
+            ri=[i for i,p in enumerate(cur) if p[2]==rol]; nr=len(ri)
+            for d in wk:
+                w=nr-sum(1 for i in ri if d in dc_sets[i])
+                if w<mn:
+                    violations.append({'regla':rule,'dia':d,
+                        'personas':[i for i in ri if d in dc_sets[i]],'tipo':'min_rol',
+                        'msg':f"🔢 {d.strftime('%d/%b')}: {w} **{rol}** activos (mín {mn})"})
+
+        elif tipo=='exclusion':
+
+            nom=rule.get('nombre',''); fs=rule.get('fecha','')
+            try: fe=datetime.datetime.strptime(fs,'%Y-%m-%d').date()
+            except: continue
+            for i,p in enumerate(cur):
+                if p[1]==nom and fe in dc_sets[i]:
+                    violations.append({'regla':rule,'dia':fe,'personas':[i],'tipo':'exclusion',
+                        'msg':f"🚫 {fe.strftime('%d/%b')}: **{nom.split()[0]}** tiene DC en fecha excluida"})
+
+    return violations
+
+def suggest_scenarios(eq, cur, dc_sets, violations):
+    N=len(cur); min_oper=cfg()['equipos'].get(eq,{}).get('min_oper',6); scenarios=[]
+    wk=get_work_days()
+    deficit_rol={}
+    for v in violations:
+        if v['tipo'] in ('cobertura','min_rol'):
+            rol=v['regla'].get('rol',''); mn=v['regla'].get('min_n',1)
+            ri=[i for i,p in enumerate(cur) if p[2]==rol]
+            w=len(ri)-sum(1 for i in ri if v['dia'] in dc_sets[i])
+            d=mn-w
+            if d>0: deficit_rol[rol]=max(deficit_rol.get(rol,0),d)
+    for rol,d in deficit_rol.items():
+        scenarios.append({'tipo':'personal','rol':rol,'cant':d,
+            'desc':f"➕ Agregar **{d}** persona(s) con rol **{rol}**",
+            'impacto':f"Cumpliría la cobertura mínima de {rol}"})
+    rr=[v for v in violations if v['tipo']=='rol_rol']
+    if rr:
+        nd=len(set(v['dia'] for v in rr))
+        scenarios.append({'tipo':'redistribuir','desc':f"↔️ Redistribuir ciclos en {nd} día(s) conflictivos",
+            'impacto':"El solver puede separar los roles automáticamente"})
+    vd=[d for d in wk if N-sum(1 for s in dc_sets if d in s)<min_oper]
+    if vd:
+        dm=max(min_oper-(N-sum(1 for s in dc_sets if d in s)) for d in vd)
+        if dm>0:
+            scenarios.append({'tipo':'personal_general','cant':dm,
+                'desc':f"➕ Agregar **{dm}** persona(s) al equipo {eq}",
+                'impacto':f"Garantizaría mínimo {min_oper} operando en todos los días"})
+    return scenarios
+
+def render_rules_panel(eq, cur, dc_sets):
+    rules=get_rules(eq); violations=validate_rules(eq,cur,dc_sets)
+    uniq_viol=len(set(v['regla']['id'] for v in violations)) if violations else 0
+    label=f"📏 Reglas {'⚠️ '+str(uniq_viol)+' conflicto(s)' if uniq_viol else '✅ sin conflictos'}"
+
+    with st.expander(label, expanded=(uniq_viol>0)):
+        # Reglas activas
+        if rules:
+            st.markdown("**Reglas activas:**")
+            for i,rule in enumerate(rules):
+                ca,cb,cc=st.columns([0.5,4,0.5])
+                act=ca.checkbox("",rule.get('activa',True),
+                    key=f"ract_{eq}_{i}",label_visibility="collapsed")
+                if act!=rule.get('activa',True):
+                    st.session_state.rules[eq][i]['activa']=act
+                nv=sum(1 for v in violations if v['regla']['id']==rule['id'])
+                ico="🔴" if nv>0 and act else ("✅" if act else "⬜")
+                cb.markdown(f"{ico} {rule['desc']}" + (f" *({nv}×)*" if nv else ""))
+                if cc.button("✕",key=f"rdel_{eq}_{i}"):
+                    st.session_state.rules[eq].pop(i); st.rerun()
+        else:
+            st.caption("Sin reglas — agrega la primera ↓")
+
+        st.markdown("---")
+        st.markdown("**➕ Nueva regla:**")
+        tipo_sel=st.selectbox("Tipo:",list(RULE_TYPES.keys()),
+            format_func=lambda k:RULE_TYPES[k],key=f"nrt_{eq}")
+        roles_eq=sorted(set(p[2] for p in cur))
+        noms_eq=sorted(set(p[1] for p in cur if 'POR CONTRATAR' not in p[1]))
+        nr={'id':f"r{len(rules)}_{eq[:2]}_{tipo_sel[:3]}",'tipo':tipo_sel,'activa':True,'equipo':eq}
+
+        if tipo_sel=='rol_rol':
+            ca,cb=st.columns(2)
+            r1=ca.selectbox("Rol 1:",roles_eq,key=f"nr1_{eq}")
+            r2=cb.selectbox("Rol 2:",[r for r in roles_eq if r!=r1],key=f"nr2_{eq}")
+            nr.update({'rol1':r1,'rol2':r2,'desc':f"{r1} ≠ {r2} mismo día DC"})
+        elif tipo_sel=='cobertura':
+            ca,cb=st.columns(2)
+            rl=ca.selectbox("Rol:",roles_eq,key=f"ncrol_{eq}")
+            mn=cb.number_input("Mín activos:",1,20,1,key=f"ncmin_{eq}")
+            nr.update({'rol':rl,'min_n':mn,'desc':f"Mín {mn} {rl} activos"})
+        elif tipo_sel=='persona_dia':
+            nom=st.selectbox("Persona:",noms_eq,key=f"npdn_{eq}")
+            dias=st.multiselect("Días permitidos:",
+                [d.strftime('%Y-%m-%d') for d in get_work_days()],
+                format_func=lambda s:datetime.datetime.strptime(s,'%Y-%m-%d').strftime('%a %d/%b'),
+                key=f"npdias_{eq}")
+            nr.update({'nombre':nom,'dias_permitidos':dias,
+                'desc':f"{nom.split()[0]}: solo descansa en {len(dias)} día(s) específicos"})
+        elif tipo_sel=='exclusion':
+            nom=st.selectbox("Persona:",noms_eq,key=f"nexn_{eq}")
+            fex=st.date_input("Fecha excluida:",cfg()['inicio'],
+                cfg()['inicio'],cfg()['fin'],key=f"nexf_{eq}")
+            nr.update({'nombre':nom,'fecha':fex.strftime('%Y-%m-%d'),
+                'desc':f"{nom.split()[0]}: NO descansa el {fex.strftime('%d/%b')}"})
+        elif tipo_sel=='min_rol':
+            ca,cb=st.columns([3,1])
+            rl=ca.selectbox("Rol:",roles_eq,key=f"nmrol_{eq}")
+            mn=cb.number_input("Mínimo:",1,50,1,key=f"nmmin_{eq}")
+            nr.update({'rol':rl,'min_n':mn,
+                'desc':f"Mínimo {mn} {rl} activos por día"})
+
+        elif tipo_sel=='inter_equipo':
+
+            eq2=st.selectbox("Equipo 2:",[e for e in EQUIPOS.keys() if e!=eq],key=f"nie2_{eq}")
+            ca,cb=st.columns(2)
+            r1=ca.selectbox(f"Rol {eq[:4]}:",roles_eq,key=f"nier1_{eq}")
+            r2e2=sorted(set(p[2] for p in _people(eq2)))
+            r2=cb.selectbox(f"Rol {eq2[:4]}:",r2e2,key=f"nier2_{eq}")
+            nr.update({'equipo2':eq2,'rol1':r1,'rol2':r2,
+                'desc':f"{r1} ({eq[:4]}) ≠ {r2} ({eq2[:4]})"})
+
+        if st.button("➕ Agregar",use_container_width=True,type="primary",key=f"addr_{eq}"):
+            get_rules(eq).append(nr)
+            st.success(f"✓ {nr['desc']}"); st.rerun()
+
+        # Conflictos y escenarios
+        if violations:
+            st.markdown("---")
+            st.markdown(f"**⚠️ Conflictos:**")
+            shown=set()
+            for v in violations[:6]:
+                k=(v['regla']['id'],v['dia'])
+                if k not in shown: shown.add(k); st.markdown(v['msg'])
+
+            scens=suggest_scenarios(eq,cur,dc_sets,violations)
+            if scens:
+                st.markdown("**💡 Para resolver:**")
+                for s in scens:
+                    bg='#EFF6FF' if 'redistribuir' in s['tipo'] else '#FFF5EC'
+                    bc='#2E75B6' if 'redistribuir' in s['tipo'] else '#C55A11'
+                    st.markdown(
+                        f'<div style="border-left:3px solid {bc};background:{bg};'
+                        f'padding:7px 11px;border-radius:4px;margin:3px 0;font-size:12px">'
+                        f'{s["desc"]}<br>'
+                        f'<span style="color:var(--color-text-secondary);font-size:11px">{s["impacto"]}</span>'
+                        f'</div>',unsafe_allow_html=True)
+                    if 'redistribuir' in s['tipo']:
+                        if st.button("⚙️ Solver automático",key=f"solvr_{eq}",use_container_width=True):
+                            with st.spinner("Resolviendo..."):
+                                sols=auto_solve(eq,cur,dc_sets)
+                            st.session_state[f'sol_{eq}']=sols or []; st.rerun()
 
 # ── Auto-scheduler ────────────────────────────────────────────────────────────
 def auto_schedule(people_input, eq, min_oper=27):
@@ -657,6 +887,13 @@ with st.sidebar:
         if ca.button("💾 Guardar",use_container_width=True,type="primary"): st.rerun()
         if cb.button("↺ Reset",use_container_width=True):
             st.session_state.cfg=default_config(); st.rerun()
+
+    # ── Panel de reglas ──────────────────────────────────────────────────────
+    st.markdown("---")
+    # Render rules panel (uses cur/dc_sets from main area - pass current state)
+    _cur_sidebar = [(p[0],p[1],p[2],p[3],get_fd(eq,i)) for i,p in enumerate(_people(eq))]
+    _dcs_sidebar = [gen_dc(p[4]) for p in _cur_sidebar]
+    render_rules_panel(eq, _cur_sidebar, _dcs_sidebar)
 
     st.divider()
     n_mod=sum(1 for k in st.session_state.ov if k[0]==eq)
