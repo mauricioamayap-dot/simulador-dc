@@ -115,6 +115,25 @@ def get_work_days():
             for i in range((e-s).days+1)
             if (s+datetime.timedelta(days=i)).weekday()!=6]
 
+def count_viol_por_rol(dc_sets_list, cur, eq):
+    """Validates both total minimum AND per-role minimums if configured."""
+    wk=get_work_days()
+    min_oper=cfg()['equipos'].get(eq,{}).get('min_oper',1)
+    min_por_rol=cfg()['equipos'].get(eq,{}).get('min_por_rol',{})
+    total_viol=0
+    for d in wk:
+        on_dc=sum(1 for s in dc_sets_list if d in s)
+        if len(cur)-on_dc < min_oper:
+            total_viol+=1; continue
+        # Check per-role minimums
+        for rol,mn in min_por_rol.items():
+            if mn<=0: continue
+            rol_idx=[i for i,p in enumerate(cur) if p[2]==rol]
+            rol_working=len(rol_idx)-sum(1 for i in rol_idx if d in dc_sets_list[i])
+            if rol_working<mn:
+                total_viol+=1; break
+    return total_viol
+
 def count_viol(dc_sets_list, N, min_oper):
     wk=get_work_days()
     return sum(1 for d in wk if N-sum(1 for s in dc_sets_list if d in s)<min_oper)
@@ -179,6 +198,21 @@ def validate_rules(eq, cur, dc_sets):
                     violations.append({'regla':rule,'dia':fe,'personas':[i],'tipo':'exclusion',
                         'msg':f"🚫 {fe.strftime('%d/%b')}: **{nom.split()[0]}** tiene DC en fecha excluida"})
 
+    # ── Mínimo por rol (desde cfg) ───────────────────────────────────────────
+    min_por_rol=cfg()['equipos'].get(eq,{}).get('min_por_rol',{})
+    for rol,mn in min_por_rol.items():
+        if mn<=0: continue
+        rol_idx=[i for i,p in enumerate(cur) if p[2]==rol]
+        nr=len(rol_idx)
+        for d in wk:
+            w=nr-sum(1 for i in rol_idx if d in dc_sets[i])
+            if w<mn:
+                fake_rule={'id':f'mpr_{rol[:8]}_{d}','tipo':'cobertura',
+                           'activa':True,'rol':rol,'min_n':mn,'equipo':eq}
+                violations.append({'regla':fake_rule,'dia':d,
+                    'personas':[i for i in rol_idx if d in dc_sets[i]],
+                    'tipo':'cobertura',
+                    'msg':f"🏷️ {d.strftime('%d/%b')}: solo {w} **{rol}** activos (mín {mn})"})
     return violations
 
 def suggest_scenarios(eq, cur, dc_sets, violations):
@@ -1117,43 +1151,92 @@ for ti,tm in enumerate(months):
 with all_tabs[-1]:
     col_p1,col_p2=st.columns(2)
     with col_p1:
+        # ── Ciclo ─────────────────────────────────────────────────────────────
         st.markdown("#### ⚙️ Ciclo de descansos")
-        ciclo_df=pd.DataFrame([
-            ("DC1 → DC2",f"+{cfg()['ciclo'][0]} días"),
-            ("DC2 → DC3",f"+{cfg()['ciclo'][1]} días"),
-            ("DC3 → DC4",f"+{cfg()['ciclo'][2]} días (ciclo 48h)"),
-            ("DC4 → DC5",f"+{cfg()['ciclo'][3]} días"),
-            ("DC5 → DC6",f"+{cfg()['ciclo'][4]} días"),
-            ("Domingo","→ mueve al lunes siguiente"),
-            ("Período",f"{cfg()['inicio'].strftime('%d/%b/%Y')} – {cfg()['fin'].strftime('%d/%b/%Y')}"),
-        ],columns=["Paso","Regla"])
-        st.dataframe(ciclo_df,hide_index=True,use_container_width=True)
+        ciclo_rows=[
+            ("DC1 → DC2", f"+{cfg()['ciclo'][0]} días"),
+            ("DC2 → DC3", f"+{cfg()['ciclo'][1]} días"),
+            ("DC3 → DC4", f"+{cfg()['ciclo'][2]} días (48h)"),
+            ("DC4 → DC5", f"+{cfg()['ciclo'][3]} días"),
+            ("DC5 → DC6", f"+{cfg()['ciclo'][4]} días"),
+            ("Domingo",   "→ lunes automático"),
+            ("Período",   f"{cfg()['inicio'].strftime('%d/%b/%Y')} – {cfg()['fin'].strftime('%d/%b/%Y')}"),
+        ]
+        t='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+        t+='<tr><th style="background:#1F3864;color:white;padding:5px 8px;text-align:left">Paso</th>'
+        t+='<th style="background:#1F3864;color:white;padding:5px 8px;text-align:left">Regla</th></tr>'
+        for i,(paso,regla) in enumerate(ciclo_rows):
+            bg='#F4F6F9' if i%2==0 else '#FFFFFF'
+            t+=(f'<tr style="background:{bg}">'
+                f'<td style="padding:5px 8px;color:#1F3864;font-weight:600;border-bottom:1px solid #dee2e6">{paso}</td>'
+                f'<td style="padding:5px 8px;color:#000;border-bottom:1px solid #dee2e6">{regla}</td></tr>')
+        t+='</table>'
+        st.markdown(t, unsafe_allow_html=True)
 
+        # ── Mínimos operacionales ─────────────────────────────────────────────
         st.markdown("#### 👥 Mínimos operacionales")
-        min_df=pd.DataFrame(
-            [(en,str(EQUIPOS[en]['n']),str(ec.get('min_oper','—')))
-             for en,ec in cfg()['equipos'].items()],
-            columns=["Equipo","Total","Mín operando"])
-        st.dataframe(min_df,hide_index=True,use_container_width=True)
+        m='<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">'
+        m+='<tr><th style="background:#1F3864;color:white;padding:5px 8px;text-align:left">Equipo</th>'
+        m+='<th style="background:#1F3864;color:white;padding:5px 8px;text-align:center">Total</th>'
+        m+='<th style="background:#1F3864;color:white;padding:5px 8px;text-align:center">Mín operando</th></tr>'
+        for i,(en,ec) in enumerate(cfg()['equipos'].items()):
+            bg='#F4F6F9' if i%2==0 else '#FFFFFF'
+            mn=ec.get('min_oper','—'); tot=EQUIPOS[en]['n']
+            ok=int(mn)<=tot if str(mn).isdigit() else True
+            mn_color='#276221' if ok else '#9C0006'
+            m+=(f'<tr style="background:{bg}">'
+                f'<td style="padding:5px 8px;color:#000;border-bottom:1px solid #dee2e6;font-weight:600">{en}</td>'
+                f'<td style="padding:5px 8px;color:#000;text-align:center;border-bottom:1px solid #dee2e6">{tot}</td>'
+                f'<td style="padding:5px 8px;color:{mn_color};text-align:center;font-weight:bold;border-bottom:1px solid #dee2e6">{mn}</td></tr>')
+        m+='</table>'
+        st.markdown(m, unsafe_allow_html=True)
+
+        # ── Mínimos por rol (equipo activo) ───────────────────────────────────
+        min_pr=cfg()['equipos'].get(eq,{}).get('min_por_rol',{})
+        if any(v>0 for v in min_pr.values()):
+            st.markdown(f"#### 🏷️ Mínimos por rol — {eq}")
+            rpr='<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">'
+            rpr+='<tr><th style="background:#1F3864;color:white;padding:5px 8px;text-align:left">Rol</th>'
+            rpr+='<th style="background:#1F3864;color:white;padding:5px 8px;text-align:center">Mín activos</th></tr>'
+            for i,(rol,mn) in enumerate(min_pr.items()):
+                if mn<=0: continue
+                bg='#F4F6F9' if i%2==0 else '#FFFFFF'
+                rc=ROL_C.get(rol,'#888')
+                rpr+=(f'<tr style="background:{bg}">'
+                      f'<td style="padding:5px 8px;border-bottom:1px solid #dee2e6">'
+                      f'<span style="background:{rc};color:white;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:bold">{rol}</span></td>'
+                      f'<td style="padding:5px 8px;color:#276221;font-weight:bold;text-align:center;border-bottom:1px solid #dee2e6">{mn}</td></tr>')
+            rpr+='</table>'
+            st.markdown(rpr, unsafe_allow_html=True)
 
     with col_p2:
+        # ── Roles con colores ─────────────────────────────────────────────────
         st.markdown("#### 🏷️ Roles")
-        roles_html=""
+        roles_html='<div style="display:flex;flex-direction:column;gap:3px">'
         for rol,color in ROL_C.items():
-            roles_html+=(f'<div style="display:flex;align-items:center;gap:6px;margin:2px 0">'
-                         f'<span style="background:{color};color:white;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:bold;min-width:155px;display:inline-block">{rol}</span>'
-                         f'</div>')
-        st.markdown(roles_html,unsafe_allow_html=True)
+            roles_html+=(f'<div style="display:flex;align-items:center;gap:6px">'
+                         f'<span style="background:{color};color:white;padding:2px 8px;'
+                         f'border-radius:3px;font-size:10px;font-weight:bold;'
+                         f'min-width:160px;display:inline-block">{rol}</span></div>')
+        roles_html+='</div>'
+        st.markdown(roles_html, unsafe_allow_html=True)
 
+        # ── Reglas especiales ─────────────────────────────────────────────────
         st.markdown("#### 📌 Reglas especiales")
-        reglas=[
-            "Líderes SECO y FRÍO no comparten DC",
-            "MCs DASA no coinciden con Líder DASA",
-            "Mínimo 1 MC operando en DASA",
-            "Mínimo 7 auxiliares en DASA",
+        # Show configured rules for current eq
+        rules_eq=get_rules(eq)
+        if rules_eq:
+            for rule in rules_eq:
+                ico="✅" if rule.get('activa',True) else "⬜"
+                st.markdown(f'<div class="prem-ok">{ico} {rule["desc"]}</div>',
+                            unsafe_allow_html=True)
+        # Default informational rules
+        default_info=[
             "Domingo → lunes automático",
+            f"Ciclo: +{cfg()['ciclo'][0]}d / +{cfg()['ciclo'][1]}d / +{cfg()['ciclo'][2]}d",
+            f"Período: {cfg()['inicio'].strftime('%d/%b')} – {cfg()['fin'].strftime('%d/%b/%Y')}",
         ]
-        for r in reglas:
+        for r in default_info:
             st.markdown(f'<div class="prem-ok">📌 {r}</div>',unsafe_allow_html=True)
 
 st.caption("Simulador DC · Jun–Jul 2026 · Ciclo 40-40-48h · Auto-scheduler · Solver 3 personas · Premisas editables")
