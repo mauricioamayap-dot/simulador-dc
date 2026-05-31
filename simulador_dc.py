@@ -7,8 +7,6 @@ import streamlit as st
 import pandas as pd
 import datetime
 import io
-import yaml
-import bcrypt
 try:
     import openpyxl
     HAS_OPENPYXL = True
@@ -18,137 +16,6 @@ except:
 st.set_page_config(page_title="Simulador DC", page_icon="📅",
                    layout="wide", initial_sidebar_state="expanded")
 
-# ════════════════════════════════════════════════════════════════════════════
-# SISTEMA DE AUTENTICACIÓN
-# ════════════════════════════════════════════════════════════════════════════
-USERS_FILE = "users.yaml"
-
-def load_users():
-    try:
-        with open(USERS_FILE, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except:
-        return {'credentials':{'usernames':{}},'cookie':{'expiry_days':1,'key':'dc2026','name':'dc_auth'}}
-
-def save_users(data):
-    with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
-
-def check_password(plain, hashed):
-    try:
-        return bcrypt.checkpw(plain.encode(), hashed.encode())
-    except:
-        return False
-
-def hash_password(plain):
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
-
-def do_login():
-    """Renderiza pantalla de login. Retorna True si autenticado."""
-    if st.session_state.get('authenticated'):
-        return True
-
-    # Pantalla de login centrada
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown(
-            '<div style="background:#1F3864;border-radius:16px;padding:40px 40px 32px;'
-            'text-align:center">'
-            '<h1 style="color:#FFFFFF;font-size:28px;margin:0">📅 Simulador DC</h1>'
-            '<p style="color:#CADCFC;font-size:13px;margin:8px 0 28px">Operaciones Logísticas · Bodega SECO & DASA</p>'
-            '</div>',
-            unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        username = st.text_input("👤 Usuario", placeholder="Ingresa tu usuario", key="login_user")
-        password = st.text_input("🔒 Contraseña", type="password", placeholder="Ingresa tu contraseña", key="login_pwd")
-
-        if st.button("Ingresar →", use_container_width=True, type="primary"):
-            data = load_users()
-            users = data.get('credentials',{}).get('usernames',{})
-            if username in users:
-                user_data = users[username]
-                if check_password(password, user_data.get('password','')):
-                    st.session_state['authenticated'] = True
-                    st.session_state['username']      = username
-                    st.session_state['user_name']     = user_data.get('name', username)
-                    st.session_state['user_role']     = user_data.get('role','viewer')
-                    st.rerun()
-                else:
-                    st.error("❌ Contraseña incorrecta")
-            else:
-                st.error("❌ Usuario no encontrado")
-        st.markdown('<p style="text-align:center;color:#888;font-size:11px;margin-top:20px">Acceso restringido · Solo personal autorizado</p>', unsafe_allow_html=True)
-    return False
-
-def admin_panel():
-    """Panel de administración de usuarios — solo para admin."""
-    if st.session_state.get('user_role') != 'admin':
-        return
-    with st.expander("👥 Administrar usuarios", expanded=False):
-        data = load_users()
-        users = data['credentials']['usernames']
-        st.markdown(f"**{len(users)} usuario(s) registrado(s)**")
-
-        # Lista de usuarios
-        for uname, udata in list(users.items()):
-            col_a, col_b, col_c, col_d = st.columns([2,2,1.5,0.8])
-            col_a.markdown(f"**{uname}**")
-            col_b.caption(udata.get('name',''))
-            role = udata.get('role','viewer')
-            role_color = '#C00000' if role=='admin' else '#375623' if role=='editor' else '#2E75B6'
-            col_c.markdown(f'<span style="background:{role_color};color:white;padding:1px 8px;border-radius:3px;font-size:10px">{role}</span>', unsafe_allow_html=True)
-            if uname != st.session_state.get('username'):  # No borrar propio usuario
-                if col_d.button("🗑", key=f"del_u_{uname}", help=f"Eliminar {uname}"):
-                    del data['credentials']['usernames'][uname]
-                    save_users(data)
-                    st.success(f"Usuario {uname} eliminado")
-                    st.rerun()
-
-        st.markdown("---")
-        st.markdown("**➕ Nuevo usuario:**")
-        c1,c2 = st.columns(2)
-        new_user  = c1.text_input("Usuario:", key="nu_user", placeholder="ej: jperez")
-        new_name  = c2.text_input("Nombre:", key="nu_name", placeholder="ej: Juan Pérez")
-        c3,c4 = st.columns(2)
-        new_pwd   = c3.text_input("Contraseña:", type="password", key="nu_pwd")
-        new_role  = c4.selectbox("Rol:", ["viewer","editor","admin"], key="nu_role",
-                                  help="viewer=solo ver | editor=editar fechas | admin=todo")
-        new_email = st.text_input("Email (opcional):", key="nu_email")
-
-        if st.button("➕ Crear usuario", use_container_width=True, type="primary", key="create_user"):
-            if not new_user or not new_pwd:
-                st.warning("Usuario y contraseña son obligatorios")
-            elif new_user in data['credentials']['usernames']:
-                st.error(f"El usuario '{new_user}' ya existe")
-            else:
-                data['credentials']['usernames'][new_user] = {
-                    'name': new_name or new_user,
-                    'email': new_email,
-                    'password': hash_password(new_pwd),
-                    'role': new_role,
-                }
-                save_users(data)
-                st.success(f"✓ Usuario **{new_user}** creado con rol **{new_role}**")
-                st.rerun()
-
-        st.markdown("---")
-        st.markdown("**🔑 Cambiar contraseña:**")
-        c5,c6 = st.columns(2)
-        chg_user = c5.selectbox("Usuario:", list(users.keys()), key="chg_u")
-        chg_pwd  = c6.text_input("Nueva contraseña:", type="password", key="chg_p")
-        if st.button("🔑 Cambiar contraseña", use_container_width=True, key="chg_btn"):
-            if chg_pwd:
-                data['credentials']['usernames'][chg_user]['password'] = hash_password(chg_pwd)
-                save_users(data)
-                st.success(f"✓ Contraseña de {chg_user} actualizada")
-            else:
-                st.warning("Ingresa la nueva contraseña")
-
-# ── Verificar autenticación ───────────────────────────────────────────────────
-if not do_login():
-    st.stop()
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 DI       = ['L','M','M','J','V','S','D']
@@ -1006,20 +873,6 @@ details summary,details summary *,details summary p,details summary span{color:#
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    # ── Usuario y logout ─────────────────────────────────────────────────────
-    user_name = st.session_state.get('user_name','Usuario')
-    user_role = st.session_state.get('user_role','viewer')
-    role_label = {'admin':'🔴 Admin','editor':'🟡 Editor','viewer':'🔵 Solo lectura'}.get(user_role, user_role)
-    col_u, col_l = st.columns([3,1])
-    col_u.markdown(f"**{user_name}** · {role_label}")
-    if col_l.button("↩", help="Cerrar sesión"):
-        for k in ['authenticated','username','user_name','user_role']:
-            st.session_state.pop(k, None)
-        st.rerun()
-
-    # Panel admin (solo admin)
-    admin_panel()
-
     st.markdown("## 📅 Simulador DC")
     st.caption("Jun 1 – Jul 12, 2026  ·  Ciclo +8/+8/+15/+8/+8")
     st.divider()
@@ -1097,11 +950,10 @@ with st.sidebar:
     def on_date():
         st.session_state.ov[(eq,sel)] = st.session_state[f'dp_{eq}_{sel}']
 
-    _can_edit = st.session_state.get("user_role","viewer") in ("admin","editor")
     st.date_input("📆 1er DC:", value=get_fd(eq,sel),
         min_value=cfg()['inicio'], max_value=cfg()['fin'],
         key=f'dp_{eq}_{sel}', on_change=on_date,
-        disabled=not _can_edit)
+)
 
     dcs_p = gen_dc_list(get_fd(eq,sel))
     for i,d in enumerate(dcs_p):
