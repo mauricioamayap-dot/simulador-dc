@@ -512,7 +512,7 @@ def render_calendar_tab(date_indices, dates_list, all_dc_sets, current_people, N
         if val == "D":   return 'background-color:#E0E0E0;color:#999;text-align:center'
         return 'background-color:#F5F5F5;text-align:center'
 
-    styled = df.style.applymap(color_cell)
+    styled = df.style.map(color_cell)
     st.dataframe(styled, use_container_width=True, height=min(40+len(current_people)*35, 800))
 
 with tab_jun:
@@ -541,7 +541,7 @@ with tab_oper:
             return 'background-color:#FFC7CE;color:#9C0006;font-weight:bold;text-align:center'
         return ''
 
-    st.dataframe(oper_df.style.applymap(color_oper), use_container_width=True, height=80)
+    st.dataframe(oper_df.style.map(color_oper), use_container_width=True, height=80)
     st.caption(f"Mínimo requerido: **{min_oper}** personas operando")
 
 # ─── RESUMEN ────────────────────────────────────────────────────────────────
