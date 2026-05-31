@@ -1024,7 +1024,21 @@ with st.sidebar:
 people = _people(eq)
 N = len(people)
 min_oper = cfg()['equipos'].get(eq,{}).get('min_oper', EQUIPOS[eq]['min_oper'])
-cur = [(p[0],p[1],p[2],p[3],get_fd(eq,i)) for i,p in enumerate(people)]
+cur_raw = [(p[0],p[1],p[2],p[3],get_fd(eq,i)) for i,p in enumerate(people)]
+
+# Ordenar por ciclo DC1→DC2→DC3, manteniendo índice original para ov
+CYC_ORD = {'DC1':0,'DC2':1,'DC3':2}
+cur_indexed = sorted(enumerate(cur_raw), key=lambda x: CYC_ORD.get(x[1][3], 9))
+orig_indices = [x[0] for x in cur_indexed]
+cur = [x[1] for x in cur_indexed]
+
+# Remap get_fd to use original indices
+def get_fd_sorted(eq, sorted_idx):
+    orig_i = orig_indices[sorted_idx]
+    return st.session_state.ov.get((eq, orig_i), people[orig_i][4])
+
+# Rebuild cur with correct overrides
+cur = [(p[0],p[1],p[2],p[3],get_fd_sorted(eq,i)) for i,p in enumerate(cur)]
 dc_sets = [gen_dc(p[4]) for p in cur]
 WORK_NOW = get_work_days()
 oper_vals = [N-sum(1 for s in dc_sets if d in s) for d in WORK_NOW]
