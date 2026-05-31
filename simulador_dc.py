@@ -99,14 +99,19 @@ def _people(eq):
 
 # ── Algoritmo ciclo DC ────────────────────────────────────────────────────────
 def gen_dc(fd):
+    """Genera todos los descansos desde fd hasta cfg fin, repitiendo el ciclo."""
     if not fd: return set()
     end=cfg()['fin']; gaps=cfg()['ciclo']
     res=[fd]; c=fd
-    for g in gaps:
-        n=c+datetime.timedelta(days=g)
-        if n.weekday()==6: n+=datetime.timedelta(days=1)
-        if n>end: break
-        res.append(n); c=n
+    max_iter=200  # seguridad: máximo 200 DCs
+    count=0
+    while count < max_iter:
+        for g in gaps:
+            n=c+datetime.timedelta(days=g)
+            if n.weekday()==6: n+=datetime.timedelta(days=1)
+            if n>end: return set(res)
+            res.append(n); c=n
+            count+=1
     return set(res)
 
 def gen_dc_list(fd): return sorted(gen_dc(fd))
